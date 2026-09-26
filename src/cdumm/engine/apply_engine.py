@@ -15,6 +15,7 @@ Bsdiff deltas use full file backups (but those files are always small).
 import logging
 import os
 import struct
+import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1866,6 +1867,30 @@ class ApplyWorker(QObject):
 
         return h.hexdigest()[:16]
 
+    def _synchronize_macos_runtime(self) -> list[Path]:
+        if sys.platform != "darwin":
+            return []
+        rows = self._db.connection.execute(
+            "SELECT 1 FROM mods WHERE runtime_plugin_path IS NOT NULL "
+            "AND runtime_plugin_path != '' LIMIT 1"
+        ).fetchone()
+        if not rows:
+            return []
+
+        from cdumm.storage.config import Config as _Config
+        cdmods = get_cdmods_root(_Config(self._db), self._game_dir)
+        from cdumm.engine.macos_runtime_plugins import MacRuntimePluginManager
+        manager = MacRuntimePluginManager(cdmods / "runtime")
+        libraries = manager.synchronize_database(self._db, self._game_dir)
+
+        self._db.connection.execute(
+            "UPDATE mods SET applied = enabled "
+            "WHERE runtime_plugin_path IS NOT NULL "
+            "AND runtime_plugin_path != ''"
+        )
+        self._db.connection.commit()
+        return libraries
+
     def _apply(self) -> None:
         _t0 = time.perf_counter()
         def _phase(name):
@@ -1873,6 +1898,13 @@ class ApplyWorker(QObject):
             logger.info("APPLY PHASE [%.1fs]: %s", elapsed, name)
 
         _phase("Starting apply")
+
+        runtime_rows = self._db.connection.execute(
+            "SELECT COUNT(*) FROM mods WHERE runtime_plugin_path IS NOT NULL "
+            "AND runtime_plugin_path != ''"
+        ).fetchone()[0]
+        runtime_managed = bool(runtime_rows)
+        self._synchronize_macos_runtime()
 
         # Fast-path: check if game files already match the current mod state
         import json as _json_mod
@@ -1968,6 +2000,11 @@ class ApplyWorker(QObject):
             has_pending_state_change = False
         if (not file_deltas and not revert_files and not has_enabled_json
                 and not has_stale_overlay and not has_pending_state_change):
+            if runtime_managed:
+                fp_path.write_text(fingerprint, encoding="utf-8")
+                self.progress_updated.emit(100, "Runtime mods applied")
+                self.finished.emit()
+                return
             self.error_occurred.emit("No mod changes to apply or revert.")
             return
         if (not file_deltas and not revert_files and not has_enabled_json
@@ -5266,6 +5303,31 @@ class RevertWorker(QObject):
 
     def _revert(self) -> None:
         """Revert all mod-affected files to vanilla using range or full backups."""
+        runtime_managed = False
+        if sys.platform == "darwin":
+            runtime_count = int(
+                self._db.connection.execute(
+                    "SELECT COUNT(*) FROM mods "
+                    "WHERE runtime_plugin_path IS NOT NULL "
+                    "AND runtime_plugin_path != ''"
+                ).fetchone()[0]
+            )
+            runtime_managed = bool(runtime_count)
+            if runtime_managed:
+                from cdumm.storage.config import Config as _Config
+                cdmods = get_cdmods_root(_Config(self._db), self._game_dir)
+                from cdumm.engine.macos_runtime_plugins import (
+                    MacRuntimePluginManager,
+                )
+                manager = MacRuntimePluginManager(cdmods / "runtime")
+                manager.disable_all()
+                self._db.connection.execute(
+                    "UPDATE mods SET applied = 0 "
+                    "WHERE runtime_plugin_path IS NOT NULL "
+                    "AND runtime_plugin_path != ''"
+                )
+                self._db.connection.commit()
+
         # Invalidate apply fingerprint
         try:
             from cdumm.storage.config import Config as _Config
@@ -5294,6 +5356,10 @@ class RevertWorker(QObject):
                 byte_files.add(fp)
         overlay_only_files = entr_files - byte_files  # files that ONLY have ENTR deltas
 
+        if not mod_files and runtime_managed:
+            self.progress_updated.emit(100, "Runtime mods reverted")
+            self.finished.emit()
+            return
         if not mod_files:
             self.error_occurred.emit("No mod data found. Nothing to revert.")
             return

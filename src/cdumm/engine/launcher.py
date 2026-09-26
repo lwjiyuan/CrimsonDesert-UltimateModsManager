@@ -10,6 +10,8 @@ pipeline and then invokes this module on success.
 from __future__ import annotations
 import logging
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,20 @@ def _find_game_exe(game_dir: Path) -> Path:
         f"CrimsonDesert.exe not found in {bin64}")
 
 
-def launch_game(game_dir: Path) -> None:
+def _find_app_bundle(game_dir: Path) -> Path | None:
+    current = Path(game_dir).resolve()
+    for _ in range(6):
+        if current.suffix == ".app" and current.is_dir():
+            return current
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
+def launch_game(
+    game_dir: Path, *, runtime_dir: Path | None = None
+) -> float | None:
     """Launch Crimson Desert via the appropriate channel for the install.
 
     Detection order:
@@ -67,22 +82,63 @@ def launch_game(game_dir: Path) -> None:
         Other exceptions propagate from the launch handler so callers
         can exit non-zero with a real error.
     """
-    exe = _find_game_exe(game_dir)
-
     from cdumm.storage.game_finder import is_steam_install, is_xbox_install
 
+    app_bundle = _find_app_bundle(game_dir) if sys.platform == "darwin" else None
+    if app_bundle is not None:
+        if runtime_dir is not None:
+            from cdumm.engine.macos_runtime_plugins import (
+                MacRuntimePluginManager,
+            )
+            manager = MacRuntimePluginManager(runtime_dir)
+            runtime_env = manager.dyld_environment()
+        else:
+            runtime_env = {}
+        if runtime_env:
+            if is_steam_install(game_dir):
+                from cdumm.engine.game_monitor import get_steam_app_id
+                app_id = str(get_steam_app_id(game_dir))
+                runtime_env.update(
+                    {
+                        "SteamAppId": app_id,
+                        "SteamGameId": app_id,
+                        "SteamClientLaunch": "1",
+                        "SteamLaunchAppId": app_id,
+                    }
+                )
+            command = ["open", "-g"]
+            for key, value in runtime_env.items():
+                command.extend(["--env", f"{key}={value}"])
+            command.append(str(app_bundle))
+            started = time.time()
+            subprocess.Popen(command)
+            logger.info(
+                "Launching Crimson Desert app with %d runtime variable(s)",
+                len(runtime_env),
+            )
+            return started
+        if is_steam_install(game_dir):
+            from cdumm.engine.game_monitor import get_steam_app_id
+            app_id = get_steam_app_id(game_dir)
+            _open_uri(f"steam://rungameid/{app_id}")
+        else:
+            subprocess.Popen(["open", str(app_bundle)])
+        return None
+
+    exe = _find_game_exe(game_dir)
     if is_steam_install(game_dir):
         from cdumm.engine.game_monitor import get_steam_app_id
         app_id = get_steam_app_id(game_dir)
         logger.info("Launching Crimson Desert via Steam (app_id=%s)", app_id)
         _open_uri(f"steam://rungameid/{app_id}")
-        return
+        return None
 
     if is_xbox_install(game_dir):
         logger.info("Launching Crimson Desert via Xbox shell URI")
         _open_uri(
             "shell:AppsFolder\\PearlAbyss.CrimsonDesert_8wekyb3d8bbwe!Game")
-        return
+        return None
 
     logger.info("Launching Crimson Desert directly: %s", exe)
     _run_exe(exe, exe.parent)
+    return None

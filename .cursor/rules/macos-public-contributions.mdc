@@ -1,0 +1,36 @@
+---
+description: macOS contribution context and public repository hygiene
+alwaysApply: true
+---
+
+# macOS Contribution Context
+
+- Upstream CDUMM development is primarily Windows-based.
+- This fork contributes macOS implementation and gameplay validation.
+- Some Windows-only ASI behaviors are adapted as native macOS runtime modules.
+- Keep platform-specific behavior isolated and preserve existing Windows paths.
+- Before committing or pushing runtime-mod behavior, obtain gameplay
+  validation of the exact candidate from the contributor.
+- Keep an English iteration record for every change that states why it was
+  needed, what changed, what it resolved, and the current test result.
+- Submit every CDUMM-related online message, including issues, pull requests,
+  reviews, and comments, to the contributor for explicit approval before
+  publishing it.
+
+# Public Contribution Hygiene
+
+- Write all newly added or modified repository content in English.
+- Never commit personal information, usernames, or machine-specific paths.
+- Use repository-relative paths in code and documentation.
+- Never commit store account data, local library paths, launch configuration,
+  manifests, identifiers, or runtime state.
+- Never commit API keys, tokens, cookies, sessions, or credentials.
+- Never commit game executables, resources, extracted assets, binary fragments,
+  or hashes of commercial binaries.
+- Do not copy third-party mod source or payloads without compatible licensing.
+- Keep reverse-engineered addresses, UUIDs, and instruction signatures in
+  local untracked configuration.
+- Keep generated libraries, archives, compatibility manifests, and runtime
+  receipts untracked.
+- Inspect the complete diff for non-English text and sensitive data before
+  committing or publishing.
