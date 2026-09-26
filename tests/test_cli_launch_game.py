@@ -49,7 +49,8 @@ def test_launch_game_invokes_apply_then_launcher(tmp_path: Path,
 
     launch_called = {"count": 0}
     monkeypatch.setattr(launcher, "launch_game",
-                        lambda gd: launch_called.update(count=launch_called["count"] + 1))
+                        lambda gd, **_kwargs: launch_called.update(
+                            count=launch_called["count"] + 1))
 
     args = type("A", (), {"game_dir": str(game_dir)})()
 

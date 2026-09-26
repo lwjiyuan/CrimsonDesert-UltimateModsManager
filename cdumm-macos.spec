@@ -134,6 +134,7 @@ a = Analysis(
         'cdumm.engine.conflict_detector',
         'cdumm.engine.apply_engine',
         'cdumm.engine.mod_manager',
+        'cdumm.engine.macos_runtime_plugins',
         'cdumm.engine.test_mod_checker',
         'cdumm.archive.transactional_io',
         'cdumm.archive.hashlittle',

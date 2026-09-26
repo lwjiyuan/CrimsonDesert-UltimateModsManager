@@ -3795,8 +3795,25 @@ class CdummWindow(FluentWindow):
         asi_mgr = AsiManager(self._game_dir / "bin64")
         paz_paths = []
         asi_count = 0
+        runtime_count = 0
         for p in paths:
-            if asi_mgr.contains_asi(p) and not _has_game_content(p):
+            from cdumm.engine.macos_runtime_plugins import (
+                MacRuntimePluginManager,
+            )
+            if MacRuntimePluginManager.is_package(p):
+                try:
+                    self._install_macos_runtime_mod(p, show_message=False)
+                    runtime_count += 1
+                except Exception as e:
+                    logger.exception("Batch: runtime install failed for %s", p)
+                    InfoBar.error(
+                        title=tr("infobar.import_failed"),
+                        content=f"{p.name}: {e}",
+                        duration=7000,
+                        position=InfoBarPosition.TOP,
+                        parent=self,
+                    )
+            elif asi_mgr.contains_asi(p) and not _has_game_content(p):
                 # Extract ZIP/7z archives to a temp dir so asi_mgr.install() (which
                 # only handles single .asi files or directories) can find them.
                 extracted_tmp = None
@@ -3835,16 +3852,22 @@ class CdummWindow(FluentWindow):
             else:
                 paz_paths.append(p)
 
-        if asi_count:
+        if asi_count or runtime_count:
             InfoBar.success(
                 title=tr("main.import_complete"),
-                content=f"{asi_count} ASI plugin(s) installed.",
+                content=(
+                    f"{runtime_count} macOS runtime mod(s), "
+                    f"{asi_count} ASI plugin(s) installed."
+                ),
                 duration=3000, position=InfoBarPosition.TOP, parent=self)
             self._warn_asi_on_store_install()
             self._refresh_all()
 
         if not paz_paths:
-            logger.info("Batch: all %d items were ASI mods, no PAZ import needed", len(paths))
+            logger.info(
+                "Batch: all %d items were runtime/ASI mods, no PAZ import needed",
+                len(paths),
+            )
             return
 
         total = len(paz_paths)
@@ -4130,7 +4153,12 @@ class CdummWindow(FluentWindow):
             prebound_id = self._existing_mod_id_map.pop(str(path), None)
         existing_mod_id = prebound_id
 
-        # ── 1. ASI detection ──────────────────────────────────────────
+        from cdumm.engine.macos_runtime_plugins import MacRuntimePluginManager
+        if MacRuntimePluginManager.is_package(path):
+            self._install_macos_runtime_mod(path)
+            self._process_next_import()
+            return
+
         from cdumm.asi.asi_manager import AsiManager
         asi_mgr = AsiManager(self._game_dir / "bin64")
         if asi_mgr.contains_asi(path) and not _has_game_content(path):
@@ -4141,7 +4169,6 @@ class CdummWindow(FluentWindow):
         # Mixed ZIPs (ASI + PAZ) go through worker, ASI files are staged
         # and installed from the result handler after worker completes
 
-        # ── 2. Snapshot check ─────────────────────────────────────────
         if not self._snapshot or not self._snapshot.has_snapshot():
             if not _is_standalone_paz_mod(path):
                 InfoBar.error(
@@ -4151,7 +4178,6 @@ class CdummWindow(FluentWindow):
                 self._process_next_import()
                 return
 
-        # ── 3. Existing mod detection ─────────────────────────────────
         # Skip when caller pre-bound a mod_id (nxm:// downloads already
         # know which mod they're updating via nexus_mod_id lookup).
         if self._mod_manager and prebound_id is None:
@@ -5878,6 +5904,51 @@ class CdummWindow(FluentWindow):
         logger.info("Import QProcess started: PID %s exe=%s args=%s",
                      proc.processId(), exe, args)
 
+    def _install_macos_runtime_mod(
+        self, path: Path, *, show_message: bool = True
+    ) -> int:
+        """Install a verified native package and register it in Mods."""
+        if not IS_MACOS:
+            raise RuntimeError("Native macOS runtime mods require macOS")
+        if not self._db:
+            raise RuntimeError("CDUMM database is unavailable")
+
+        from cdumm.engine.macos_runtime_plugins import MacRuntimePluginManager
+        manager = MacRuntimePluginManager(self._cdmods_dir / "runtime")
+
+        import zipfile
+        import json
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        declared = str(manifest.get("game_version") or "").strip()
+        parts = declared.split(".")
+        group_name = ".".join(parts[:2]) if len(parts) >= 2 else declared
+        if not group_name:
+            raise ValueError("Runtime package does not declare a game version")
+
+        plugin, mod_id = manager.install_registered(
+            path,
+            self._db,
+            group_name=group_name,
+            enabled=True,
+            game_dir=self._game_dir,
+        )
+        if self._mod_manager:
+            self._mod_manager.cleanup_orphaned_deltas()
+        self._refresh_all()
+        if show_message:
+            InfoBar.success(
+                title=tr("main.import_complete"),
+                content=(
+                    f"{plugin.name} was added to group {group_name}. "
+                    "Click Apply before launching the game through CDUMM."
+                ),
+                duration=5000,
+                position=InfoBarPosition.TOP,
+                parent=self,
+            )
+        return mod_id
+
     def _install_asi_mod(self, path: Path, asi_mgr=None) -> None:
         """Install an ASI mod by copying .asi/.ini files to bin64/."""
         import tempfile
@@ -6820,14 +6891,53 @@ class CdummWindow(FluentWindow):
             from cdumm.storage.game_finder import is_steam_install
             app_bundle = _find_app_bundle_above(self._game_dir)
             try:
-                if is_steam_install(self._game_dir):
-                    # Steam install: hand the launch off THROUGH Steam so
-                    # the DRM / ownership check passes. `open <app>` starts
-                    # the bundle outside Steam's launch flow, and Crimson
-                    # Desert aborts with "Steam needs to be running" even
-                    # when the client is running (macOS Steam DRM). Mirrors
-                    # the Windows branch, which always routes Steam installs
-                    # through the rungameid URI.
+                from cdumm.engine.macos_runtime_plugins import (
+                    MacRuntimePluginManager,
+                )
+                runtime_manager = MacRuntimePluginManager(
+                    self._cdmods_dir / "runtime"
+                )
+                if runtime_manager.enabled_libraries():
+                    from cdumm.engine import launcher
+                    launched_at = launcher.launch_game(
+                        self._game_dir,
+                        runtime_dir=self._cdmods_dir / "runtime",
+                    )
+
+                    def _verify_runtime() -> None:
+                        handshake = runtime_manager.latest_handshake(
+                            since=launched_at or 0.0
+                        )
+                        pid = int(handshake.get("pid", 0)) if handshake else 0
+                        alive = False
+                        if pid:
+                            try:
+                                __import__("os").kill(pid, 0)
+                                alive = True
+                            except OSError:
+                                pass
+                        if handshake and alive:
+                            InfoBar.success(
+                                title="Runtime mod loaded",
+                                content="The runtime receipt was verified.",
+                                duration=6000,
+                                position=InfoBarPosition.TOP,
+                                parent=self,
+                            )
+                        else:
+                            InfoBar.error(
+                                title="Runtime mod not verified",
+                                content=(
+                                    "No valid runtime receipt was received. "
+                                    "Apply the mod again before retrying."
+                                ),
+                                duration=10000,
+                                position=InfoBarPosition.TOP,
+                                parent=self,
+                            )
+
+                    QTimer.singleShot(15000, _verify_runtime)
+                elif is_steam_install(self._game_dir):
                     from cdumm.engine.game_monitor import get_steam_app_id
                     app_id = get_steam_app_id(self._game_dir)
                     subprocess.Popen(["open", f"steam://rungameid/{app_id}"])

@@ -138,6 +138,58 @@ def cmd_set_enabled(args):
     db.close()
 
 
+def cmd_import_runtime(args):
+    """Import a verified native macOS runtime package into a version group."""
+    game_dir = _resolve_game_dir(args.game_dir)
+    if not game_dir:
+        print("Error: cannot find game directory. Use --game-dir.",
+              file=sys.stderr)
+        sys.exit(1)
+    package = Path(args.package).expanduser().resolve()
+    if not package.is_file():
+        print(f"Error: package not found: {package}", file=sys.stderr)
+        sys.exit(1)
+
+    db = _open_db(game_dir)
+    from cdumm.engine.macos_runtime_plugins import MacRuntimePluginManager
+    cdmods = _cdmods_root(game_dir, db)
+    manager = MacRuntimePluginManager(cdmods / "runtime")
+    if not manager.is_package(package):
+        print("Error: not a CDUMM macOS runtime package.", file=sys.stderr)
+        db.close()
+        sys.exit(1)
+    try:
+        plugin, mod_id = manager.install_registered(
+            package,
+            db,
+            group_name=args.group,
+            enabled=True,
+            game_dir=game_dir,
+        )
+    except Exception as exc:
+        db.close()
+        print(f"Error: runtime import failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    state = db.connection.execute(
+        "SELECT enabled, applied FROM mods WHERE id = ?", (mod_id,)
+    ).fetchone()
+    print(
+        json.dumps(
+            {
+                "id": mod_id,
+                "name": plugin.name,
+                "version": plugin.version,
+                "group": args.group,
+                "enabled": bool(state[0]),
+                "applied": bool(state[1]),
+                "runtime_plugin_path": str(plugin.directory),
+            },
+            ensure_ascii=False,
+        )
+    )
+    db.close()
+
+
 def cmd_cleanup_duplicates(args):
     """Find and merge duplicate mod rows.
 
@@ -320,7 +372,40 @@ def cmd_launch_game(args):
     print("Apply complete; launching game...", file=sys.stderr)
     try:
         from cdumm.engine import launcher
-        launcher.launch_game(game_dir)
+        cdmods = get_cdmods_root(None, game_dir)
+        launched_at = launcher.launch_game(
+            game_dir, runtime_dir=cdmods / "runtime"
+        )
+        if launched_at is not None:
+            from cdumm.engine.macos_runtime_plugins import (
+                MacRuntimePluginManager,
+            )
+            manager = MacRuntimePluginManager(cdmods / "runtime")
+            handshake = manager.wait_for_handshake(
+                since=launched_at, timeout=30.0
+            )
+            if not handshake:
+                print(
+                    "Launch failed: runtime plugin did not report a "
+                    "successful patch within 30 seconds.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            pid = int(handshake.get("pid", 0))
+            try:
+                import os
+                os.kill(pid, 0)
+            except OSError:
+                print(
+                    "Launch failed: the game exited after runtime injection.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(
+                "Runtime receipt verified for "
+                f"{handshake.get('plugin_id', 'native plugin')}.",
+                file=sys.stderr,
+            )
     except FileNotFoundError as e:
         print(f"Launch failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -531,6 +616,16 @@ def main():
     p_set.add_argument("--enabled", required=True, help="true or false")
     p_set.add_argument("--game-dir", default=None, help="Game directory override")
 
+    p_runtime = sub.add_parser(
+        "import-runtime",
+        help="Import a verified native macOS runtime package",
+    )
+    p_runtime.add_argument("package", help="Path to the runtime ZIP")
+    p_runtime.add_argument("--group", required=True, help="Version group name")
+    p_runtime.add_argument(
+        "--game-dir", default=None, help="Game directory override"
+    )
+
     # apply
     p_apply = sub.add_parser("apply", help="Apply current mod state to game files")
     p_apply.add_argument("--game-dir", default=None, help="Game directory override")
@@ -563,6 +658,8 @@ def main():
         cmd_list_mods(args)
     elif args.command == "set-enabled":
         cmd_set_enabled(args)
+    elif args.command == "import-runtime":
+        cmd_import_runtime(args)
     elif args.command == "apply":
         cmd_apply(args)
     elif args.command == "launch-game":

@@ -497,6 +497,17 @@ class Database:
             )
             logger.info("Migrated: added applied column to mods")
 
+        if "runtime_plugin_path" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN runtime_plugin_path TEXT"
+            )
+            logger.info("Migrated: added runtime_plugin_path column to mods")
+        if "runtime_game_uuid" not in columns:
+            self._connection.execute(
+                "ALTER TABLE mods ADD COLUMN runtime_game_uuid TEXT"
+            )
+            logger.info("Migrated: added runtime_game_uuid column to mods")
+
         # Add conflict_mode column to mods for per-mod override declaration
         if "conflict_mode" not in columns:
             self._connection.execute(

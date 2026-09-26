@@ -24,7 +24,8 @@ class ModManager:
             "game_version_hash, source_path, author, version, description, configurable, "
             "force_inplace, notes, group_id, drop_name, conflict_mode, target_language, "
             "nexus_mod_id, nexus_file_id, json_source, variants, "
-            "last_apply_skipped_count, last_apply_skip_summary "
+            "last_apply_skipped_count, last_apply_skip_summary, "
+            "runtime_plugin_path, runtime_game_uuid "
             "FROM mods"
         )
         if mod_type:
@@ -51,6 +52,8 @@ class ModManager:
                 "variants": row[21] if len(row) > 21 else None,
                 "last_apply_skipped_count": row[22] if len(row) > 22 else 0,
                 "last_apply_skip_summary": row[23] if len(row) > 23 else None,
+                "runtime_plugin_path": row[24] if len(row) > 24 else None,
+                "runtime_game_uuid": row[25] if len(row) > 25 else None,
             }
             for row in cursor.fetchall()
         ]
@@ -135,10 +138,14 @@ class ModManager:
         to revert game files. We disable the mod first and keep its delta
         entries until after the next Apply reverts them, then clean up.
         """
-        cursor = self._db.connection.execute("SELECT name, enabled FROM mods WHERE id = ?", (mod_id,))
+        cursor = self._db.connection.execute(
+            "SELECT name, enabled, runtime_plugin_path FROM mods WHERE id = ?",
+            (mod_id,),
+        )
         row = cursor.fetchone()
         mod_name = row[0] if row else f"Mod {mod_id}"
         was_enabled = bool(row[1]) if row else False
+        runtime_plugin_path = row[2] if row else None
 
         if was_enabled:
             # Disable first — next Apply will revert its files
@@ -159,6 +166,31 @@ class ModManager:
         sources_dir = self._deltas_dir.parent / "sources" / str(mod_id)
         if sources_dir.exists():
             shutil.rmtree(sources_dir, ignore_errors=True)
+
+        if runtime_plugin_path:
+            runtime_path = Path(runtime_plugin_path)
+            runtime_root = (self._deltas_dir.parent / "runtime").resolve()
+            try:
+                runtime_path.resolve().relative_to(runtime_root)
+            except ValueError:
+                logger.error(
+                    "Refusing to remove runtime path outside CDMods/runtime: %s",
+                    runtime_path,
+                )
+            else:
+                try:
+                    from cdumm.engine.macos_runtime_plugins import (
+                        MacRuntimePluginManager,
+                    )
+                    runtime_manager = MacRuntimePluginManager(runtime_root)
+                    plugin = runtime_manager._load(runtime_path)
+                    runtime_manager.set_enabled(plugin, False)
+                except (OSError, ValueError, KeyError) as exc:
+                    logger.warning(
+                        "Runtime launch cleanup before uninstall failed: %s",
+                        exc,
+                    )
+                shutil.rmtree(runtime_path, ignore_errors=True)
 
         # Delete from DB (cascade removes mod_deltas and conflicts)
         self._db.connection.execute("DELETE FROM mods WHERE id = ?", (mod_id,))
@@ -367,7 +399,8 @@ class ModManager:
         """
         # Check if enabled
         row = self._db.connection.execute(
-            "SELECT enabled, game_version_hash FROM mods WHERE id = ?", (mod_id,)).fetchone()
+            "SELECT enabled, game_version_hash, runtime_plugin_path "
+            "FROM mods WHERE id = ?", (mod_id,)).fetchone()
         if not row or not row[0]:
             # Check if also outdated
             is_outdated = False
@@ -388,6 +421,19 @@ class ModManager:
                 if bad_copy > 0:
                     is_outdated = True
             return "disabled (outdated)" if is_outdated else "disabled"
+
+        if row[2]:
+            runtime_dir = Path(row[2])
+            try:
+                from cdumm.engine.macos_runtime_plugins import (
+                    MacRuntimePluginManager,
+                )
+                plugin = MacRuntimePluginManager(runtime_dir.parent)._load(
+                    runtime_dir
+                )
+                return "active" if plugin.enabled else "not applied"
+            except (OSError, ValueError, KeyError):
+                return "no data"
 
         # Check if mod is outdated (version mismatch or old format)
         is_outdated = False
@@ -560,6 +606,8 @@ class ModManager:
             "SELECT m.id, m.name FROM mods m "
             "WHERE m.enabled = 0 "
             "AND (m.json_source IS NULL OR m.json_source = '') "
+            "AND (m.runtime_plugin_path IS NULL "
+            "     OR m.runtime_plugin_path = '') "
             "AND NOT EXISTS "
             "(SELECT 1 FROM mod_deltas md WHERE md.mod_id = m.id)"
         ).fetchall()
