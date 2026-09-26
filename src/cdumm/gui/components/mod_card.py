@@ -560,6 +560,9 @@ class ModCard(CardWidget):
         self._checkbox.setChecked(checked)
         self._checkbox.blockSignals(False)
 
+    def is_checked(self) -> bool:
+        return self._checkbox.isChecked()
+
     # ── Hover ───────────────────────────────────────────────────────────
 
     def enterEvent(self, event):  # noqa: N802
@@ -895,8 +898,7 @@ class FolderGroup(QWidget):
         self._count_label.setFont(cf)
         header_layout.addWidget(self._count_label)
 
-        # Select all button for this group (hidden — top-level Select All is sufficient)
-        self._select_all_btn = CaptionLabel(tr("mod_card.select_all"))
+        self._select_all_btn = CaptionLabel(tr("toggle.select_all"))
         self._select_all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._select_all_btn.mousePressEvent = lambda _e: self._on_select_all_clicked()
         self._apply_select_all_style()
@@ -966,6 +968,13 @@ class FolderGroup(QWidget):
 
     def set_count(self, n: int) -> None:
         self._count_label.setText(f"({n})")
+
+    def set_bulk_toggle_state(
+        self, *, all_checked: bool, has_cards: bool
+    ) -> None:
+        key = "toggle.deselect_all" if all_checked else "toggle.select_all"
+        self._select_all_btn.setText(tr(key))
+        self._select_all_btn.setVisible(has_cards)
 
     def is_expanded(self) -> bool:
         return self._expanded

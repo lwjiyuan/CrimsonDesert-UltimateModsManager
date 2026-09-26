@@ -754,6 +754,7 @@ class ModsPage(QWidget):
         for card in self._mod_cards:
             if hasattr(card, "retranslate_version"):
                 card.retranslate_version()
+        self._sync_group_bulk_actions()
 
     # ------------------------------------------------------------------
     # Mod cards
@@ -968,6 +969,7 @@ class ModsPage(QWidget):
         # Update counts
         for gid, fg in self._folder_groups.items():
             fg.set_count(group_counts.get(gid, 0))
+        self._sync_group_bulk_actions()
 
         # Show/hide empty state hero
         if hasattr(self, '_empty_hero'):
@@ -1107,6 +1109,7 @@ class ModsPage(QWidget):
         # fallback always wrote the GLOBAL card count into the group
         # label. Count the group's own cards instead.
         target_group.set_count(len(target_group.get_mod_ids()))
+        self._sync_group_bulk_actions()
 
         # Hide the empty-state hero since we have at least one card now
         if hasattr(self, "_empty_hero"):
@@ -1211,6 +1214,7 @@ class ModsPage(QWidget):
                     card.set_pending(None)
         self._update_stats()
         self._resume_db_watcher()
+        self._sync_group_bulk_actions()
 
     def _sync_select_all(self) -> None:
         """Update select-all checkbox to match current card states. Two states only."""
@@ -1219,6 +1223,21 @@ class ModsPage(QWidget):
         self._select_all_cb.blockSignals(True)
         self._select_all_cb.setChecked(bool(all_checked))
         self._select_all_cb.blockSignals(False)
+
+    def _sync_group_bulk_actions(self) -> None:
+        cards_by_id = {card.mod_id: card for card in self._mod_cards}
+        for group in self._folder_groups.values():
+            cards = [
+                cards_by_id[mod_id]
+                for mod_id in group.get_mod_ids()
+                if mod_id in cards_by_id
+            ]
+            group.set_bulk_toggle_state(
+                all_checked=bool(cards) and all(
+                    card.is_checked() for card in cards
+                ),
+                has_cards=bool(cards),
+            )
 
     # ------------------------------------------------------------------
     # Mod toggle
@@ -1264,6 +1283,8 @@ class ModsPage(QWidget):
 
         self._update_stats()
         self._resume_db_watcher()
+        self._sync_select_all()
+        self._sync_group_bulk_actions()
 
     # ------------------------------------------------------------------
     # Ctrl+Click / Shift+Click selection
@@ -1320,18 +1341,24 @@ class ModsPage(QWidget):
             return
         all_checked = all(c._checkbox.isChecked() for c in group_cards)
         new_state = not all_checked
-        for c in group_cards:
-            c.set_checked(new_state)
-            if self._mod_manager:
-                self._mod_manager.set_enabled(c.mod_id, new_state)
-                is_applied = self._applied_state.get(c.mod_id) is True
-                if new_state and not is_applied:
-                    c.set_pending("Apply to Activate")
-                elif not new_state and is_applied:
-                    c.set_pending("Apply to Deactivate")
-                else:
-                    c.set_pending(None)
+        self._pause_db_watcher()
+        try:
+            for c in group_cards:
+                c.set_checked(new_state)
+                if self._mod_manager:
+                    self._mod_manager.set_enabled(c.mod_id, new_state)
+                    is_applied = self._applied_state.get(c.mod_id) is True
+                    if new_state and not is_applied:
+                        c.set_pending("Apply to Activate")
+                    elif not new_state and is_applied:
+                        c.set_pending("Apply to Deactivate")
+                    else:
+                        c.set_pending(None)
+        finally:
+            self._resume_db_watcher()
         self._update_stats()
+        self._sync_select_all()
+        self._sync_group_bulk_actions()
 
     def _deselect_all_cards(self) -> None:
         """Clear selection from all cards."""
@@ -3078,6 +3105,9 @@ class ModsPage(QWidget):
             "UPDATE mods SET group_id = ? WHERE id = ?", (group_id, mod_id)
         )
         self._db.connection.commit()
+        for group in self._folder_groups.values():
+            group.set_count(len(group.get_mod_ids()))
+        self._sync_group_bulk_actions()
 
     # ------------------------------------------------------------------
     # Folder group management
